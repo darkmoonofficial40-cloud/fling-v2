@@ -1,1 +1,463 @@
+-- Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local CoreGui = game:GetService("CoreGui")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- // CONFIGURATION //
+local CUSTOM_LOGO_ID = "rbxassetid://14179802057"
+
+local function FormatAssetId(id)
+	if not id or id == "" then return "" end
+	local str = tostring(id)
+	if str:find("rbxassetid://") then
+		return str
+	end
+	return "rbxassetid://" .. str
+end
+
+local LogoImageId = FormatAssetId(CUSTOM_LOGO_ID)
+
+-- State
+local TouchFlingActive = false
+local TargetPlayer = nil
+local PhysicsConnection = nil
+local NoclipConnection = nil
+local CachedParts = {}
+local SavedCFrame = nil
+
+-- Cleanup existing UI
+local UI_NAME = "DarkMoonBlackHoleFling"
+if CoreGui:FindFirstChild(UI_NAME) then
+	CoreGui[UI_NAME]:Destroy()
+elseif LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild(UI_NAME) then
+	LocalPlayer.PlayerGui[UI_NAME]:Destroy()
+end
+
+-- ScreenGui
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = UI_NAME
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local ok = pcall(function() ScreenGui.Parent = CoreGui end)
+if not ok then ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+-- Helper to apply logo to either a full button or header icon
+local function ApplyLogo(parentObj, fallbackText, textSize, isFullButton)
+	if LogoImageId ~= "" then
+		local img = Instance.new(isFullButton and "ImageButton" or "ImageLabel")
+		img.Size = isFullButton and UDim2.new(1, -6, 1, -6) or UDim2.new(0, 24, 0, 24)
+		img.Position = isFullButton and UDim2.new(0, 3, 0, 3) or UDim2.new(0, 0, 0.5, -12)
+		img.BackgroundTransparency = 1
+		img.Image = LogoImageId
+		img.ScaleType = Enum.ScaleType.Fit
+		img.Parent = parentObj
+
+		local imgCorner = Instance.new("UICorner")
+		imgCorner.CornerRadius = UDim.new(1, 0)
+		imgCorner.Parent = img
+		return img
+	else
+		local lbl = Instance.new(isFullButton and "TextButton" or "TextLabel")
+		lbl.Size = isFullButton and UDim2.new(1, 0, 1, 0) or UDim2.new(0, 24, 0, 24)
+		lbl.Position = isFullButton and UDim2.new(0, 0, 0, 0) or UDim2.new(0, 0, 0.5, -12)
+		lbl.BackgroundTransparency = 1
+		lbl.Text = fallbackText
+		lbl.TextColor3 = Color3.fromRGB(170, 140, 255)
+		lbl.TextSize = textSize
+		lbl.Font = Enum.Font.GothamBold
+		if isFullButton then
+			lbl.AutoButtonColor = false
+		end
+		lbl.Parent = parentObj
+		return lbl
+	end
+end
+
+-- Floating Toggle Button
+local FloatingHolder = Instance.new("Frame")
+FloatingHolder.Name = "FloatingToggle"
+FloatingHolder.Size = UDim2.new(0, 46, 0, 46)
+FloatingHolder.Position = UDim2.new(0.05, 0, 0.25, 0)
+FloatingHolder.BackgroundColor3 = Color3.fromRGB(16, 16, 22)
+FloatingHolder.Active = true
+FloatingHolder.Draggable = true
+FloatingHolder.Parent = ScreenGui
+
+local FloatCorner = Instance.new("UICorner")
+FloatCorner.CornerRadius = UDim.new(1, 0)
+FloatCorner.Parent = FloatingHolder
+
+local FloatStroke = Instance.new("UIStroke")
+FloatStroke.Color = Color3.fromRGB(115, 80, 235)
+FloatStroke.Thickness = 1.5
+FloatStroke.Parent = FloatingHolder
+
+local FloatingAction = ApplyLogo(FloatingHolder, "☾", 22, true)
+
+-- Main Panel
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 240, 0, 290)
+MainFrame.Position = UDim2.new(0.5, -120, 0.5, -145)
+MainFrame.BackgroundColor3 = Color3.fromRGB(14, 14, 19)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 12)
+MainCorner.Parent = MainFrame
+
+local MainStroke = Instance.new("UIStroke")
+MainStroke.Color = Color3.fromRGB(45, 45, 62)
+MainStroke.Thickness = 1.5
+MainStroke.Parent = MainFrame
+
+-- Title Header with Custom Logo
+local HeaderContainer = Instance.new("Frame")
+HeaderContainer.Size = UDim2.new(1, -24, 0, 34)
+HeaderContainer.Position = UDim2.new(0, 12, 0, 2)
+HeaderContainer.BackgroundTransparency = 1
+HeaderContainer.Parent = MainFrame
+
+ApplyLogo(HeaderContainer, "☾", 16, false)
+
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Size = UDim2.new(1, -30, 1, 0)
+TitleLabel.Position = UDim2.new(0, 30, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "BLACK HOLE FLING"
+TitleLabel.TextColor3 = Color3.fromRGB(240, 240, 250)
+TitleLabel.TextSize = 13
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Parent = HeaderContainer
+
+local Divider = Instance.new("Frame")
+Divider.Size = UDim2.new(1, -24, 0, 1)
+Divider.Position = UDim2.new(0, 12, 0, 36)
+Divider.BackgroundColor3 = Color3.fromRGB(38, 38, 50)
+Divider.BorderSizePixel = 0
+Divider.Parent = MainFrame
+
+-- Touch Fling Row
+local ToggleRow = Instance.new("Frame")
+ToggleRow.Size = UDim2.new(1, -24, 0, 40)
+ToggleRow.Position = UDim2.new(0, 12, 0, 44)
+ToggleRow.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+ToggleRow.BorderSizePixel = 0
+ToggleRow.Parent = MainFrame
+
+local RowCorner = Instance.new("UICorner")
+RowCorner.CornerRadius = UDim.new(0, 8)
+RowCorner.Parent = ToggleRow
+
+local ToggleLabel = Instance.new("TextLabel")
+ToggleLabel.Size = UDim2.new(0.65, 0, 1, 0)
+ToggleLabel.Position = UDim2.new(0, 10, 0, 0)
+ToggleLabel.BackgroundTransparency = 1
+ToggleLabel.Text = "Touch Fling"
+ToggleLabel.TextColor3 = Color3.fromRGB(215, 215, 230)
+ToggleLabel.TextSize = 13
+ToggleLabel.Font = Enum.Font.GothamMedium
+ToggleLabel.TextXAlignment = Enum.TextXAlignment.Left
+ToggleLabel.Parent = ToggleRow
+
+local SwitchBg = Instance.new("TextButton")
+SwitchBg.Size = UDim2.new(0, 44, 0, 22)
+SwitchBg.Position = UDim2.new(1, -54, 0.5, -11)
+SwitchBg.BackgroundColor3 = Color3.fromRGB(45, 45, 58)
+SwitchBg.Text = ""
+SwitchBg.AutoButtonColor = false
+SwitchBg.Parent = ToggleRow
+
+local SwitchCorner = Instance.new("UICorner")
+SwitchCorner.CornerRadius = UDim.new(1, 0)
+SwitchCorner.Parent = SwitchBg
+
+local Knob = Instance.new("Frame")
+Knob.Size = UDim2.new(0, 16, 0, 16)
+Knob.Position = UDim2.new(0, 3, 0.5, -8)
+Knob.BackgroundColor3 = Color3.fromRGB(240, 240, 250)
+Knob.BorderSizePixel = 0
+Knob.Parent = SwitchBg
+
+local KnobCorner = Instance.new("UICorner")
+KnobCorner.CornerRadius = UDim.new(1, 0)
+KnobCorner.Parent = Knob
+
+-- Player List Header
+local ListHeader = Instance.new("TextLabel")
+ListHeader.Size = UDim2.new(1, -24, 0, 20)
+ListHeader.Position = UDim2.new(0, 12, 0, 92)
+ListHeader.BackgroundTransparency = 1
+ListHeader.Text = "TARGET PLAYER (TAP TO FLING)"
+ListHeader.TextColor3 = Color3.fromRGB(145, 145, 165)
+ListHeader.TextSize = 10
+ListHeader.Font = Enum.Font.GothamBold
+ListHeader.TextXAlignment = Enum.TextXAlignment.Left
+ListHeader.Parent = MainFrame
+
+-- Scrolling Player List
+local PlayerScroll = Instance.new("ScrollingFrame")
+PlayerScroll.Size = UDim2.new(1, -24, 0, 162)
+PlayerScroll.Position = UDim2.new(0, 12, 0, 114)
+PlayerScroll.BackgroundColor3 = Color3.fromRGB(19, 19, 26)
+PlayerScroll.BorderSizePixel = 0
+PlayerScroll.ScrollBarThickness = 3
+PlayerScroll.ScrollBarImageColor3 = Color3.fromRGB(115, 80, 235)
+PlayerScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+PlayerScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+PlayerScroll.Parent = MainFrame
+
+local ScrollCorner = Instance.new("UICorner")
+ScrollCorner.CornerRadius = UDim.new(0, 8)
+ScrollCorner.Parent = PlayerScroll
+
+local UIList = Instance.new("UIListLayout")
+UIList.Padding = UDim.new(0, 4)
+UIList.SortOrder = Enum.SortOrder.Name
+UIList.Parent = PlayerScroll
+
+local UIPadding = Instance.new("UIPadding")
+UIPadding.PaddingTop = UDim.new(0, 5)
+UIPadding.PaddingBottom = UDim.new(0, 5)
+UIPadding.PaddingLeft = UDim.new(0, 5)
+UIPadding.PaddingRight = UDim.new(0, 5)
+UIPadding.Parent = PlayerScroll
+
+-- Cache character BaseParts to avoid expensive GetDescendants() every frame
+local function RebuildPartCache(char)
+	table.clear(CachedParts)
+	if not char then return end
+	for _, part in ipairs(char:GetDescendants()) do
+		if part:IsA("BasePart") then
+			table.insert(CachedParts, part)
+		end
+	end
+end
+
+if LocalPlayer.Character then
+	RebuildPartCache(LocalPlayer.Character)
+end
+LocalPlayer.CharacterAdded:Connect(function(char)
+	RebuildPartCache(char)
+	char.DescendantAdded:Connect(function(desc)
+		if desc:IsA("BasePart") then
+			table.insert(CachedParts, desc)
+		end
+	end)
+end)
+
+local function RestoreCollisions(state)
+	for i = 1, #CachedParts do
+		local part = CachedParts[i]
+		if part and part.Parent then
+			part.CanCollide = state
+		end
+	end
+end
+
+local function ReturnToSavedPosition()
+	local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+	if hrp then
+		hrp.AssemblyAngularVelocity = Vector3.zero
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		if SavedCFrame then
+			hrp.CFrame = SavedCFrame
+			SavedCFrame = nil
+		end
+	end
+end
+
+local function StopAllFling()
+	TargetPlayer = nil
+	if PhysicsConnection then
+		PhysicsConnection:Disconnect()
+		PhysicsConnection = nil
+	end
+	if NoclipConnection then
+		NoclipConnection:Disconnect()
+		NoclipConnection = nil
+	end
+
+	local char = LocalPlayer.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+		hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
+	end
+
+	ReturnToSavedPosition()
+	RestoreCollisions(true)
+end
+
+local function EnsurePhysicsLoop()
+	if NoclipConnection then NoclipConnection:Disconnect() end
+	if PhysicsConnection then PhysicsConnection:Disconnect() end
+
+	NoclipConnection = RunService.Stepped:Connect(function()
+		RestoreCollisions(false)
+	end)
+
+	local spinAngle = 0
+	PhysicsConnection = RunService.Heartbeat:Connect(function(dt)
+		local char = LocalPlayer.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not hrp or not hum then return end
+
+		hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+		hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+
+		if TargetPlayer then
+			local tChar = TargetPlayer.Character
+			local tHrp = tChar and tChar:FindFirstChild("HumanoidRootPart")
+			local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
+
+			-- Stop target lock when target dies, leaves, or gets launched
+			if not tHrp or not tHum or tHum.Health <= 0 or tHrp.AssemblyLinearVelocity.Magnitude > 300 then
+				TargetPlayer = nil
+				if not TouchFlingActive then
+					StopAllFling()
+				else
+					ReturnToSavedPosition()
+				end
+				return
+			end
+
+			spinAngle = spinAngle + (dt * 75)
+			local predictedPos = tHrp.Position + (tHrp.AssemblyLinearVelocity * 0.05)
+			local orbitOffset = Vector3.new(math.cos(spinAngle) * 1.1, 0, math.sin(spinAngle) * 1.1)
+			hrp.CFrame = CFrame.new(predictedPos + orbitOffset)
+		end
+
+		local savedVel = hrp.AssemblyLinearVelocity
+		hrp.AssemblyAngularVelocity = Vector3.new(0, 1e6, 0)
+		hrp.AssemblyLinearVelocity = Vector3.new(savedVel.X * 180, 1e5, savedVel.Z * 180)
+
+		RunService.RenderStepped:Once(function()
+			if hrp and hrp.Parent then
+				hrp.AssemblyLinearVelocity = TargetPlayer and Vector3.zero or savedVel
+			end
+		end)
+	end)
+end
+
+-- Toggle Switch Logic
+local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+SwitchBg.MouseButton1Click:Connect(function()
+	TouchFlingActive = not TouchFlingActive
+
+	if TouchFlingActive then
+		TweenService:Create(SwitchBg, tweenInfo, {BackgroundColor3 = Color3.fromRGB(115, 80, 235)}):Play()
+		TweenService:Create(Knob, tweenInfo, {Position = UDim2.new(1, -19, 0.5, -8)}):Play()
+		EnsurePhysicsLoop()
+	else
+		TweenService:Create(SwitchBg, tweenInfo, {BackgroundColor3 = Color3.fromRGB(45, 45, 58)}):Play()
+		TweenService:Create(Knob, tweenInfo, {Position = UDim2.new(0, 3, 0.5, -8)}):Play()
+		if not TargetPlayer then
+			StopAllFling()
+		end
+	end
+end)
+
+-- Dynamic Player List Builder
+local PlayerButtons = {}
+
+local function RefreshPlayerList()
+	for _, btn in pairs(PlayerButtons) do
+		btn:Destroy()
+	end
+	table.clear(PlayerButtons)
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LocalPlayer then
+			local ItemBtn = Instance.new("TextButton")
+			ItemBtn.Name = plr.Name
+			ItemBtn.Size = UDim2.new(1, 0, 0, 32)
+			ItemBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 38)
+			ItemBtn.Text = ""
+			ItemBtn.AutoButtonColor = false
+			ItemBtn.Parent = PlayerScroll
+
+			local ItemCorner = Instance.new("UICorner")
+			ItemCorner.CornerRadius = UDim.new(0, 6)
+			ItemCorner.Parent = ItemBtn
+
+			local NameTxt = Instance.new("TextLabel")
+			NameTxt.Size = UDim2.new(0.7, 0, 1, 0)
+			NameTxt.Position = UDim2.new(0, 10, 0, 0)
+			NameTxt.BackgroundTransparency = 1
+			NameTxt.Text = plr.DisplayName .. " (@" .. plr.Name .. ")"
+			NameTxt.TextColor3 = Color3.fromRGB(225, 225, 240)
+			NameTxt.TextSize = 11
+			NameTxt.Font = Enum.Font.GothamMedium
+			NameTxt.TextXAlignment = Enum.TextXAlignment.Left
+			NameTxt.TextTruncate = Enum.TextTruncate.AtEnd
+			NameTxt.Parent = ItemBtn
+
+			local ActionBadge = Instance.new("TextLabel")
+			ActionBadge.Size = UDim2.new(0, 48, 0, 20)
+			ActionBadge.Position = UDim2.new(1, -54, 0.5, -10)
+			ActionBadge.BackgroundColor3 = Color3.fromRGB(115, 80, 235)
+			ActionBadge.Text = "FLING"
+			ActionBadge.TextColor3 = Color3.fromRGB(255, 255, 255)
+			ActionBadge.TextSize = 10
+			ActionBadge.Font = Enum.Font.GothamBold
+			ActionBadge.Parent = ItemBtn
+
+			local BadgeCorner = Instance.new("UICorner")
+			BadgeCorner.CornerRadius = UDim.new(0, 4)
+			BadgeCorner.Parent = ActionBadge
+
+			ItemBtn.MouseButton1Click:Connect(function()
+				local myHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+				if not myHrp then return end
+
+				if TargetPlayer == plr then
+					TargetPlayer = nil
+					if not TouchFlingActive then
+						StopAllFling()
+					else
+						ReturnToSavedPosition()
+					end
+				else
+					if not SavedCFrame then
+						SavedCFrame = myHrp.CFrame
+					end
+					TargetPlayer = plr
+					EnsurePhysicsLoop()
+				end
+			end)
+
+			PlayerButtons[plr.UserId] = ItemBtn
+		end
+	end
+end
+
+RefreshPlayerList()
+Players.PlayerAdded:Connect(RefreshPlayerList)
+Players.PlayerRemoving:Connect(function(plr)
+	if TargetPlayer == plr then
+		TargetPlayer = nil
+		if not TouchFlingActive then
+			StopAllFling()
+		else
+			ReturnToSavedPosition()
+		end
+	end
+	RefreshPlayerList()
+end)
+
+-- Floating Toggle Visibility
+FloatingAction.MouseButton1Click:Connect(function()
+	MainFrame.Visible = not MainFrame.Visible
+end)
 
