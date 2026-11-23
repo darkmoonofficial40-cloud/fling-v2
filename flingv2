@@ -1,4 +1,4 @@
--- Services
+-- NDS Global Hub V6 (Bug-Fixed, Mobile-Safe, Error-Free)
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
@@ -8,259 +8,309 @@ local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
 
 -- // CONFIGURATION //
-local CUSTOM_LOGO_ID = "732391130"
-local HUB_TITLE = "NDS GLOBAL HUB"
+local CUSTOM_LOGO_ID = "" -- e.g. "1234567890" or "rbxassetid://1234567890"
+local HUB_TITLE = "NDS HUB V6"
 
 local function NormalizeAssetId(id)
 	if not id or tostring(id) == "" then return "" end
-	local s = tostring(id):match("%d+") or tostring(id)
-	return "rbxassetid://" .. s
+	local raw = tostring(id)
+	if raw:match("^rbxassetid://") then
+		return raw
+	end
+	return "rbxassetid://" .. raw
 end
 
-local LogoId = NormalizeAssetId(CUSTOM_LOGO_ID)
+local LogoAsset = NormalizeAssetId(CUSTOM_LOGO_ID)
 
--- State
+-- Cleanup any prior instance
+local GUI_NAME = "NDSGlobalHub_V6"
+local function RemoveOldGui(root)
+	if not root then return end
+	local old = root:FindFirstChild(GUI_NAME)
+	if old then
+		old:Destroy()
+	end
+end
+RemoveOldGui(CoreGui)
+RemoveOldGui(LocalPlayer:FindFirstChildOfClass("PlayerGui"))
+
+-- Power Presets
+local PowerPresets = {
+	{ label = "PWR: LOW", value = 4500 },
+	{ label = "PWR: MED", value = 8500 },
+	{ label = "PWR: HIGH", value = 14000 },
+}
+local powerIndex = 2
+
+-- Application State
 local State = {
 	TouchFling = false,
 	TargetPlayer = nil,
+	ViewingPlayer = nil,
 	AntiVoid = true,
 	FullBright = false,
+	SpeedBoost = false,
+	JumpBoost = false,
+	FlingPower = PowerPresets[powerIndex].value,
 	SavedCFrame = nil,
+	SearchText = "",
 }
 
-local Connections = {
-	Stepped = nil,
-	Heartbeat = nil,
-	VoidWatch = nil,
-}
+local Connections = {}
+local CachedNonRoot = {}
+local PlayerRowRefs = {}
 
-local CachedParts = {}
-local SavedLighting = {
+local DefaultLighting = {
 	Brightness = Lighting.Brightness,
 	ClockTime = Lighting.ClockTime,
 	FogEnd = Lighting.FogEnd,
 	GlobalShadows = Lighting.GlobalShadows,
 }
 
--- Cleanup old UI
-local UI_NAME = "NDSGlobalHubUI"
-if CoreGui:FindFirstChild(UI_NAME) then
-	CoreGui[UI_NAME]:Destroy()
-end
-local PlayerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-if PlayerGui and PlayerGui:FindFirstChild(UI_NAME) then
-	PlayerGui[UI_NAME]:Destroy()
-end
-
--- Root ScreenGui
+-- ScreenGui Setup
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = UI_NAME
+ScreenGui.Name = GUI_NAME
 ScreenGui.ResetOnSpawn = false
 ScreenGui.IgnoreGuiInset = true
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
-local ok = pcall(function() ScreenGui.Parent = CoreGui end)
-if not ok then ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+local mountedToCore = pcall(function()
+	ScreenGui.Parent = CoreGui
+end)
+if not mountedToCore then
+	ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
 
--- UI Helpers
-local function AddCorner(inst, radius)
+-- UI Styling Helpers
+local function AddRound(inst, radius)
 	local c = Instance.new("UICorner")
 	c.CornerRadius = UDim.new(0, radius)
 	c.Parent = inst
 	return c
 end
 
-local function AddStroke(inst, color, thickness)
+local function AddBorder(inst, color, thickness)
 	local s = Instance.new("UIStroke")
 	s.Color = color
 	s.Thickness = thickness or 1.2
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	s.Parent = inst
 	return s
 end
 
-local function MountLogo(parent, fallbackText, textSize, isButton)
-	if LogoId ~= "" then
-		local img = Instance.new(isButton and "ImageButton" or "ImageLabel")
+local function CreateLogoView(parent, fallbackGlyph, sizePx, asButton)
+	if LogoAsset ~= "" then
+		local img = Instance.new(asButton and "ImageButton" or "ImageLabel")
 		img.Size = UDim2.fromScale(1, 1)
+		img.Position = UDim2.fromScale(0, 0)
 		img.BackgroundTransparency = 1
-		img.Image = LogoId
+		img.Image = LogoAsset
 		img.ScaleType = Enum.ScaleType.Fit
 		img.Parent = parent
-		AddCorner(img, 999)
+		AddRound(img, 999)
 		return img
 	else
-		local lbl = Instance.new(isButton and "TextButton" or "TextLabel")
+		local lbl = Instance.new(asButton and "TextButton" or "TextLabel")
 		lbl.Size = UDim2.fromScale(1, 1)
+		lbl.Position = UDim2.fromScale(0, 0)
 		lbl.BackgroundTransparency = 1
-		lbl.Text = fallbackText
-		lbl.TextColor3 = Color3.fromRGB(175, 145, 255)
-		lbl.TextSize = textSize
+		lbl.Text = fallbackGlyph
+		lbl.TextColor3 = Color3.fromRGB(182, 152, 255)
+		lbl.TextSize = sizePx
 		lbl.Font = Enum.Font.GothamBold
-		if isButton then lbl.AutoButtonColor = false end
+		if asButton then
+			lbl.AutoButtonColor = false
+		end
 		lbl.Parent = parent
 		return lbl
 	end
 end
 
 -- Floating Circular Toggle Button
-local FloatBtn = Instance.new("Frame")
-FloatBtn.Name = "FloatingToggle"
-FloatBtn.Size = UDim2.fromOffset(46, 46)
-FloatBtn.Position = UDim2.new(0.05, 0, 0.22, 0)
-FloatBtn.BackgroundColor3 = Color3.fromRGB(16, 16, 23)
-FloatBtn.Active = true
-FloatBtn.Draggable = true
-FloatBtn.Parent = ScreenGui
-AddCorner(FloatBtn, 999)
-AddStroke(FloatBtn, Color3.fromRGB(120, 85, 240), 1.5)
+local FloatHolder = Instance.new("Frame")
+FloatHolder.Name = "FloatingToggle"
+FloatHolder.Size = UDim2.fromOffset(46, 46)
+FloatHolder.Position = UDim2.new(0.04, 0, 0.22, 0)
+FloatHolder.BackgroundColor3 = Color3.fromRGB(16, 16, 24)
+FloatHolder.Active = true
+FloatHolder.Draggable = true
+FloatHolder.Parent = ScreenGui
+AddRound(FloatHolder, 999)
+AddBorder(FloatHolder, Color3.fromRGB(125, 88, 245), 1.5)
 
-local FloatClick = MountLogo(FloatBtn, "☾", 22, true)
+local FloatBtn = CreateLogoView(FloatHolder, "☾", 22, true)
 
 -- Main Window
-local MainFrame = Instance.new("Frame")
-MainFrame.Name = "MainPanel"
-MainFrame.Size = UDim2.fromOffset(256, 355)
-MainFrame.Position = UDim2.new(0.5, -128, 0.5, -177)
-MainFrame.BackgroundColor3 = Color3.fromRGB(14, 14, 20)
-MainFrame.BorderSizePixel = 0
-MainFrame.Active = true
-MainFrame.Draggable = true
-MainFrame.Parent = ScreenGui
-AddCorner(MainFrame, 12)
-AddStroke(MainFrame, Color3.fromRGB(44, 44, 62), 1.4)
+local MainWindow = Instance.new("Frame")
+MainWindow.Name = "MainWindow"
+MainWindow.Size = UDim2.fromOffset(268, 430)
+MainWindow.Position = UDim2.new(0.5, -134, 0.5, -215)
+MainWindow.BackgroundColor3 = Color3.fromRGB(14, 14, 20)
+MainWindow.BorderSizePixel = 0
+MainWindow.Active = true
+MainWindow.Draggable = true
+MainWindow.Parent = ScreenGui
+AddRound(MainWindow, 12)
+AddBorder(MainWindow, Color3.fromRGB(46, 46, 66), 1.4)
 
 -- Header
 local Header = Instance.new("Frame")
-Header.Size = UDim2.new(1, -24, 0, 36)
+Header.Size = UDim2.new(1, -24, 0, 34)
 Header.Position = UDim2.fromOffset(12, 4)
 Header.BackgroundTransparency = 1
-Header.Parent = MainFrame
+Header.Parent = MainWindow
 
-local LogoSlot = Instance.new("Frame")
-LogoSlot.Size = UDim2.fromOffset(22, 22)
-LogoSlot.Position = UDim2.new(0, 0, 0.5, -11)
-LogoSlot.BackgroundTransparency = 1
-LogoSlot.Parent = Header
-MountLogo(LogoSlot, "☾", 15, false)
+local HeaderLogoBox = Instance.new("Frame")
+HeaderLogoBox.Size = UDim2.fromOffset(20, 20)
+HeaderLogoBox.Position = UDim2.new(0, 0, 0.5, -10)
+HeaderLogoBox.BackgroundTransparency = 1
+HeaderLogoBox.Parent = Header
+CreateLogoView(HeaderLogoBox, "☾", 15, false)
 
-local TitleLbl = Instance.new("TextLabel")
-TitleLbl.Size = UDim2.new(1, -28, 1, 0)
-TitleLbl.Position = UDim2.fromOffset(28, 0)
-TitleLbl.BackgroundTransparency = 1
-TitleLbl.Text = HUB_TITLE
-TitleLbl.TextColor3 = Color3.fromRGB(240, 240, 252)
-TitleLbl.TextSize = 13
-TitleLbl.Font = Enum.Font.GothamBold
-TitleLbl.TextXAlignment = Enum.TextXAlignment.Left
-TitleLbl.Parent = Header
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Size = UDim2.new(1, -28, 1, 0)
+TitleLabel.Position = UDim2.fromOffset(28, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = HUB_TITLE
+TitleLabel.TextColor3 = Color3.fromRGB(242, 242, 255)
+TitleLabel.TextSize = 13
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Parent = Header
 
 local Divider = Instance.new("Frame")
 Divider.Size = UDim2.new(1, -24, 0, 1)
-Divider.Position = UDim2.fromOffset(12, 40)
-Divider.BackgroundColor3 = Color3.fromRGB(38, 38, 52)
+Divider.Position = UDim2.fromOffset(12, 38)
+Divider.BackgroundColor3 = Color3.fromRGB(38, 38, 54)
 Divider.BorderSizePixel = 0
-Divider.Parent = MainFrame
+Divider.Parent = MainWindow
 
--- Helper to create a clean toggle switch row
-local function CreateSwitchRow(yPos, labelText, initialState, onChanged)
+-- Toggle Row Builder
+local function MakeToggleRow(yPos, labelText, initialOn, onToggle)
 	local row = Instance.new("Frame")
-	row.Size = UDim2.new(1, -24, 0, 36)
+	row.Size = UDim2.new(1, -24, 0, 32)
 	row.Position = UDim2.fromOffset(12, yPos)
 	row.BackgroundColor3 = Color3.fromRGB(22, 22, 31)
 	row.BorderSizePixel = 0
-	row.Parent = MainFrame
-	AddCorner(row, 8)
+	row.Parent = MainWindow
+	AddRound(row, 8)
 
-	local lbl = Instance.new("TextLabel")
-	lbl.Size = UDim2.new(0.68, 0, 1, 0)
-	lbl.Position = UDim2.fromOffset(10, 0)
-	lbl.BackgroundTransparency = 1
-	lbl.Text = labelText
-	lbl.TextColor3 = Color3.fromRGB(220, 220, 235)
-	lbl.TextSize = 12
-	lbl.Font = Enum.Font.GothamMedium
-	lbl.TextXAlignment = Enum.TextXAlignment.Left
-	lbl.Parent = row
+	local txt = Instance.new("TextLabel")
+	txt.Size = UDim2.new(0.72, 0, 1, 0)
+	txt.Position = UDim2.fromOffset(10, 0)
+	txt.BackgroundTransparency = 1
+	txt.Text = labelText
+	txt.TextColor3 = Color3.fromRGB(222, 222, 238)
+	txt.TextSize = 11
+	txt.Font = Enum.Font.GothamMedium
+	txt.TextXAlignment = Enum.TextXAlignment.Left
+	txt.Parent = row
 
-	local bg = Instance.new("TextButton")
-	bg.Size = UDim2.fromOffset(42, 20)
-	bg.Position = UDim2.new(1, -52, 0.5, -10)
-	bg.BackgroundColor3 = initialState and Color3.fromRGB(120, 85, 240) or Color3.fromRGB(45, 45, 58)
-	bg.Text = ""
-	bg.AutoButtonColor = false
-	bg.Parent = row
-	AddCorner(bg, 999)
+	local pill = Instance.new("TextButton")
+	pill.Size = UDim2.fromOffset(40, 18)
+	pill.Position = UDim2.new(1, -50, 0.5, -9)
+	pill.BackgroundColor3 = initialOn and Color3.fromRGB(125, 88, 245) or Color3.fromRGB(46, 46, 60)
+	pill.Text = ""
+	pill.AutoButtonColor = false
+	pill.Parent = row
+	AddRound(pill, 999)
 
 	local knob = Instance.new("Frame")
-	knob.Size = UDim2.fromOffset(14, 14)
-	knob.Position = initialState and UDim2.new(1, -17, 0.5, -7) or UDim2.fromOffset(3, 3)
+	knob.Size = UDim2.fromOffset(12, 12)
+	knob.Position = initialOn and UDim2.new(1, -15, 0.5, -6) or UDim2.fromOffset(3, 3)
 	knob.BackgroundColor3 = Color3.fromRGB(245, 245, 255)
 	knob.BorderSizePixel = 0
-	knob.Parent = bg
-	AddCorner(knob, 999)
+	knob.Parent = pill
+	AddRound(knob, 999)
 
-	local active = initialState
-	local tInfo = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local active = initialOn
+	local tween = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
-	local function SetVisual(state)
-		active = state
-		TweenService:Create(bg, tInfo, {
-			BackgroundColor3 = state and Color3.fromRGB(120, 85, 240) or Color3.fromRGB(45, 45, 58)
+	pill.MouseButton1Click:Connect(function()
+		active = not active
+		TweenService:Create(pill, tween, {
+			BackgroundColor3 = active and Color3.fromRGB(125, 88, 245) or Color3.fromRGB(46, 46, 60)
 		}):Play()
-		TweenService:Create(knob, tInfo, {
-			Position = state and UDim2.new(1, -17, 0.5, -7) or UDim2.fromOffset(3, 3)
+		TweenService:Create(knob, tween, {
+			Position = active and UDim2.new(1, -15, 0.5, -6) or UDim2.fromOffset(3, 3)
 		}):Play()
-	end
-
-	bg.MouseButton1Click:Connect(function()
-		SetVisual(not active)
-		if onChanged then
-			onChanged(active)
+		if onToggle then
+			onToggle(active)
 		end
 	end)
-
-	return SetVisual
 end
 
--- Character Cache & Safe Helpers
-local function RebuildCharacterCache(char)
-	table.clear(CachedParts)
+-- Character Cache & Safe Physics Helpers
+local function RefreshPartCache(char)
+	table.clear(CachedNonRoot)
 	if not char then return end
-	for _, d in ipairs(char:GetDescendants()) do
-		if d:IsA("BasePart") then
-			table.insert(CachedParts, d)
+	for _, desc in ipairs(char:GetDescendants()) do
+		if desc:IsA("BasePart") and desc.Name ~= "HumanoidRootPart" then
+			table.insert(CachedNonRoot, desc)
 		end
 	end
 end
 
-local function OnCharacterReady(char)
-	RebuildCharacterCache(char)
-	char.DescendantAdded:Connect(function(d)
-		if d:IsA("BasePart") then
-			table.insert(CachedParts, d)
-		end
-	end)
-end
-
-if LocalPlayer.Character then
-	OnCharacterReady(LocalPlayer.Character)
-end
-LocalPlayer.CharacterAdded:Connect(OnCharacterReady)
-
-local function SetCharacterCollide(collide)
-	for i = 1, #CachedParts do
-		local p = CachedParts[i]
-		if p and p.Parent then
-			p.CanCollide = collide
+local function SetNonRootCanCollide(canCollide)
+	for i = 1, #CachedNonRoot do
+		local part = CachedNonRoot[i]
+		if part and part.Parent then
+			part.CanCollide = canCollide
 		end
 	end
 end
 
-local function ResetMomentumAndReturn()
+local function ClearSpinnerParts()
+	local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+	local spinner = hrp:FindFirstChild("NDSFlingSpinner")
+	if spinner then spinner:Destroy() end
+	local att = hrp:FindFirstChild("NDSFlingAtt")
+	if att then att:Destroy() end
+end
+
+local function EnsureSpinner(hrp)
+	local att = hrp:FindFirstChild("NDSFlingAtt")
+	if not att then
+		att = Instance.new("Attachment")
+		att.Name = "NDSFlingAtt"
+		att.Parent = hrp
+	end
+
+	local spinner = hrp:FindFirstChild("NDSFlingSpinner")
+	if not spinner then
+		spinner = Instance.new("AngularVelocity")
+		spinner.Name = "NDSFlingSpinner"
+		spinner.Attachment0 = att
+		spinner.RelativeTo = Enum.ActuatorRelativeTo.World
+		spinner.MaxTorque = 1e6
+		spinner.Parent = hrp
+	end
+	spinner.AngularVelocity = Vector3.new(0, State.FlingPower, 0)
+	return spinner
+end
+
+local function ResetCameraToSelf()
+	State.ViewingPlayer = nil
+	local cam = workspace.CurrentCamera
+	local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+	if cam and hum then
+		cam.CameraSubject = hum
+		cam.CameraType = Enum.CameraType.Custom
+	end
+	for _, entry in pairs(PlayerRowRefs) do
+		if entry.viewBtn then
+			entry.viewBtn.Text = "VIEW"
+			entry.viewBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 60)
+		end
+	end
+end
+
+local function RestoreSavedCFrame()
 	local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 	if hrp then
-		hrp.AssemblyAngularVelocity = Vector3.zero
 		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
 		if State.SavedCFrame then
 			hrp.CFrame = State.SavedCFrame
 			State.SavedCFrame = nil
@@ -268,33 +318,22 @@ local function ResetMomentumAndReturn()
 	end
 end
 
-local function FindSafeIslandCFrame()
-	local spawns = {}
-	for _, obj in ipairs(workspace:GetDescendants()) do
-		if obj:IsA("SpawnLocation") then
-			table.insert(spawns, obj.CFrame + Vector3.new(0, 4, 0))
-		elseif obj:IsA("BasePart") and (obj.Name:lower():find("lobby") or obj.Name:lower():find("island") or obj.Name:lower():find("safe")) then
-			if obj.Size.X > 15 and obj.Size.Z > 15 then
-				table.insert(spawns, obj.CFrame + Vector3.new(0, obj.Size.Y * 0.5 + 3, 0))
-			end
-		end
+local function DisconnectFlingLoops()
+	if Connections.FlingStep then
+		Connections.FlingStep:Disconnect()
+		Connections.FlingStep = nil
 	end
-	if #spawns > 0 then
-		return spawns[1]
+	if Connections.FlingBeat then
+		Connections.FlingBeat:Disconnect()
+		Connections.FlingBeat = nil
 	end
-	return CFrame.new(0, 60, 0)
 end
 
-local function StopFling()
+local function StopFlingCompletely()
 	State.TargetPlayer = nil
-	if Connections.Stepped then
-		Connections.Stepped:Disconnect()
-		Connections.Stepped = nil
-	end
-	if Connections.Heartbeat then
-		Connections.Heartbeat:Disconnect()
-		Connections.Heartbeat = nil
-	end
+	DisconnectFlingLoops()
+	ClearSpinnerParts()
+	ResetCameraToSelf()
 
 	local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
 	if hum then
@@ -302,21 +341,25 @@ local function StopFling()
 		hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
 	end
 
-	ResetMomentumAndReturn()
-	SetCharacterCollide(true)
+	SetNonRootCanCollide(true)
+	RestoreSavedCFrame()
 end
 
-local function StartFling()
-	if Connections.Stepped then Connections.Stepped:Disconnect() end
-	if Connections.Heartbeat then Connections.Heartbeat:Disconnect() end
+local function StartFlingEngine()
+	DisconnectFlingLoops()
 
-	Connections.Stepped = RunService.Stepped:Connect(function()
+	local initHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+	if initHrp then
+		EnsureSpinner(initHrp)
+	end
+
+	Connections.FlingStep = RunService.Stepped:Connect(function()
 		if not State.TouchFling and not State.TargetPlayer then return end
-		SetCharacterCollide(false)
+		SetNonRootCanCollide(false)
 	end)
 
-	local angle = 0
-	Connections.Heartbeat = RunService.Heartbeat:Connect(function(dt)
+	local orbitPhase = 0
+	Connections.FlingBeat = RunService.Heartbeat:Connect(function(dt)
 		if not State.TouchFling and not State.TargetPlayer then return end
 
 		local char = LocalPlayer.Character
@@ -327,214 +370,430 @@ local function StartFling()
 		hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
 		hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
 
+		local spinner = EnsureSpinner(hrp)
+		spinner.AngularVelocity = Vector3.new(0, State.FlingPower, 0)
+
 		if State.TargetPlayer then
 			local tChar = State.TargetPlayer.Character
 			local tHrp = tChar and tChar:FindFirstChild("HumanoidRootPart")
 			local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
 
+			-- Auto-release when target is knocked out, leaves, or gets launched
 			if not tHrp or not tHum or tHum.Health <= 0 or tHrp.AssemblyLinearVelocity.Magnitude > 220 then
 				State.TargetPlayer = nil
+				if State.ViewingPlayer == State.TargetPlayer then
+					ResetCameraToSelf()
+				end
 				if not State.TouchFling then
-					StopFling()
+					StopFlingCompletely()
 				else
-					ResetMomentumAndReturn()
+					RestoreSavedCFrame()
 				end
 				return
 			end
 
-			angle += dt * 45
-			local offset = Vector3.new(math.cos(angle) * 1.3, 0, math.sin(angle) * 1.3)
-			hrp.CFrame = CFrame.new(tHrp.Position + offset)
-		end
-
-		hrp.AssemblyAngularVelocity = Vector3.new(0, 2400, 0)
-		if State.TargetPlayer then
-			hrp.AssemblyLinearVelocity = Vector3.new(0, 40, 0)
+			orbitPhase += dt * 36
+			local ring = Vector3.new(math.cos(orbitPhase) * 1.2, 0, math.sin(orbitPhase) * 1.2)
+			local targetSpot = tHrp.Position + (tHrp.AssemblyLinearVelocity * 0.035) + ring
+			hrp.CFrame = CFrame.new(targetSpot)
+			hrp.AssemblyLinearVelocity = Vector3.new(0, 30, 0)
 		end
 	end)
 end
 
--- Anti-Void Watcher
-Connections.VoidWatch = RunService.Heartbeat:Connect(function()
-	if not State.AntiVoid then return end
-	local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-	if hrp and hrp.Position.Y < -35 then
-		hrp.AssemblyLinearVelocity = Vector3.zero
-		hrp.AssemblyAngularVelocity = Vector3.zero
-		hrp.CFrame = FindSafeIslandCFrame()
+-- Map / Safe Spot Helpers for Natural Disaster Survival
+local function FindSafeLobbyCFrame()
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst:IsA("SpawnLocation") then
+			return inst.CFrame + Vector3.new(0, 4, 0)
+		end
 	end
-end)
+	return CFrame.new(0, 65, 0)
+end
+
+local function FindHighestSafePoint()
+	local bestY = -math.huge
+	local bestCF = nil
+	for _, part in ipairs(workspace:GetDescendants()) do
+		if part:IsA("BasePart") and part.Anchored and part.CanCollide then
+			if part.Size.X >= 10 and part.Size.Z >= 10 and part.Position.Y > bestY and part.Position.Y < 500 then
+				bestY = part.Position.Y
+				bestCF = part.CFrame + Vector3.new(0, part.Size.Y * 0.5 + 3.5, 0)
+			end
+		end
+	end
+	return bestCF or FindSafeLobbyCFrame()
+end
 
 -- Toggles
-CreateSwitchRow(48, "Touch Fling", false, function(enabled)
-	State.TouchFling = enabled
-	if enabled then
-		StartFling()
+MakeToggleRow(44, "Touch Fling", false, function(on)
+	State.TouchFling = on
+	if on then
+		StartFlingEngine()
 	elseif not State.TargetPlayer then
-		StopFling()
+		StopFlingCompletely()
 	end
 end)
 
-CreateSwitchRow(90, "Anti-Void Rescue", true, function(enabled)
-	State.AntiVoid = enabled
+MakeToggleRow(80, "Anti-Void Rescue", true, function(on)
+	State.AntiVoid = on
 end)
 
-CreateSwitchRow(132, "Disaster Fullbright", false, function(enabled)
-	State.FullBright = enabled
-	if enabled then
+MakeToggleRow(116, "Disaster Fullbright", false, function(on)
+	State.FullBright = on
+	if on then
 		Lighting.Brightness = 2.5
 		Lighting.ClockTime = 14
 		Lighting.FogEnd = 100000
 		Lighting.GlobalShadows = false
 	else
-		Lighting.Brightness = SavedLighting.Brightness
-		Lighting.ClockTime = SavedLighting.ClockTime
-		Lighting.FogEnd = SavedLighting.FogEnd
-		Lighting.GlobalShadows = SavedLighting.GlobalShadows
+		Lighting.Brightness = DefaultLighting.Brightness
+		Lighting.ClockTime = DefaultLighting.ClockTime
+		Lighting.FogEnd = DefaultLighting.FogEnd
+		Lighting.GlobalShadows = DefaultLighting.GlobalShadows
 	end
 end)
 
--- Safe Island Teleport Button
-local TpIslandBtn = Instance.new("TextButton")
-TpIslandBtn.Size = UDim2.new(1, -24, 0, 32)
-TpIslandBtn.Position = UDim2.fromOffset(12, 174)
-TpIslandBtn.BackgroundColor3 = Color3.fromRGB(32, 26, 54)
-TpIslandBtn.Text = "TP TO SAFE ISLAND / LOBBY"
-TpIslandBtn.TextColor3 = Color3.fromRGB(205, 185, 255)
-TpIslandBtn.TextSize = 11
-TpIslandBtn.Font = Enum.Font.GothamBold
-TpIslandBtn.AutoButtonColor = false
-TpIslandBtn.Parent = MainFrame
-AddCorner(TpIslandBtn, 8)
-AddStroke(TpIslandBtn, Color3.fromRGB(115, 80, 235), 1)
+MakeToggleRow(152, "Speed Boost (28)", false, function(on)
+	State.SpeedBoost = on
+	local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.WalkSpeed = on and 28 or 16
+	end
+end)
 
-TpIslandBtn.MouseButton1Click:Connect(function()
+MakeToggleRow(188, "High Jump (72)", false, function(on)
+	State.JumpBoost = on
+	local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.UseJumpPower = true
+		hum.JumpPower = on and 72 or 50
+	end
+end)
+
+-- Action Buttons Row 1: Safe Lobby + High Ground
+local LobbyBtn = Instance.new("TextButton")
+LobbyBtn.Size = UDim2.new(0.5, -14, 0, 28)
+LobbyBtn.Position = UDim2.fromOffset(12, 226)
+LobbyBtn.BackgroundColor3 = Color3.fromRGB(32, 26, 54)
+LobbyBtn.Text = "SAFE LOBBY"
+LobbyBtn.TextColor3 = Color3.fromRGB(210, 190, 255)
+LobbyBtn.TextSize = 10
+LobbyBtn.Font = Enum.Font.GothamBold
+LobbyBtn.AutoButtonColor = false
+LobbyBtn.Parent = MainWindow
+AddRound(LobbyBtn, 7)
+AddBorder(LobbyBtn, Color3.fromRGB(115, 80, 235), 1)
+
+LobbyBtn.MouseButton1Click:Connect(function()
 	local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 	if hrp then
 		hrp.AssemblyLinearVelocity = Vector3.zero
 		hrp.AssemblyAngularVelocity = Vector3.zero
-		hrp.CFrame = FindSafeIslandCFrame()
+		hrp.CFrame = FindSafeLobbyCFrame()
 	end
 end)
 
--- Target Player List
-local ListHeader = Instance.new("TextLabel")
-ListHeader.Size = UDim2.new(1, -24, 0, 18)
-ListHeader.Position = UDim2.fromOffset(12, 212)
-ListHeader.BackgroundTransparency = 1
-ListHeader.Text = "PLAYERS (TAP TO TARGET FLING)"
-ListHeader.TextColor3 = Color3.fromRGB(145, 145, 168)
-ListHeader.TextSize = 10
-ListHeader.Font = Enum.Font.GothamBold
-ListHeader.TextXAlignment = Enum.TextXAlignment.Left
-ListHeader.Parent = MainFrame
+local HighBtn = Instance.new("TextButton")
+HighBtn.Size = UDim2.new(0.5, -14, 0, 28)
+HighBtn.Position = UDim2.new(0.5, 2, 0, 226)
+HighBtn.BackgroundColor3 = Color3.fromRGB(24, 42, 54)
+HighBtn.Text = "HIGH GROUND"
+HighBtn.TextColor3 = Color3.fromRGB(175, 230, 255)
+HighBtn.TextSize = 10
+HighBtn.Font = Enum.Font.GothamBold
+HighBtn.AutoButtonColor = false
+HighBtn.Parent = MainWindow
+AddRound(HighBtn, 7)
+AddBorder(HighBtn, Color3.fromRGB(65, 145, 195), 1)
 
-local PlayerScroll = Instance.new("ScrollingFrame")
-PlayerScroll.Size = UDim2.new(1, -24, 0, 112)
-PlayerScroll.Position = UDim2.fromOffset(12, 232)
-PlayerScroll.BackgroundColor3 = Color3.fromRGB(19, 19, 27)
-PlayerScroll.BorderSizePixel = 0
-PlayerScroll.ScrollBarThickness = 3
-PlayerScroll.ScrollBarImageColor3 = Color3.fromRGB(120, 85, 240)
-PlayerScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-PlayerScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-PlayerScroll.Parent = MainFrame
-AddCorner(PlayerScroll, 8)
-
-local ListLayout = Instance.new("UIListLayout")
-ListLayout.Padding = UDim.new(0, 4)
-ListLayout.SortOrder = Enum.SortOrder.Name
-ListLayout.Parent = PlayerScroll
-
-local ListPad = Instance.new("UIPadding")
-ListPad.PaddingTop = UDim.new(0, 5)
-ListPad.PaddingBottom = UDim.new(0, 5)
-ListPad.PaddingLeft = UDim.new(0, 5)
-ListPad.PaddingRight = UDim.new(0, 5)
-ListPad.Parent = PlayerScroll
-
-local PlayerItems = {}
-
-local function RebuildPlayerList()
-	for _, item in pairs(PlayerItems) do
-		item:Destroy()
+HighBtn.MouseButton1Click:Connect(function()
+	local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+	if hrp then
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
+		hrp.CFrame = FindHighestSafePoint()
 	end
-	table.clear(PlayerItems)
+end)
+
+-- Action Buttons Row 2: Fling Power Cycle + Stop Fling
+local PowerBtn = Instance.new("TextButton")
+PowerBtn.Size = UDim2.new(0.5, -14, 0, 28)
+PowerBtn.Position = UDim2.fromOffset(12, 258)
+PowerBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 40)
+PowerBtn.Text = PowerPresets[powerIndex].label
+PowerBtn.TextColor3 = Color3.fromRGB(225, 225, 245)
+PowerBtn.TextSize = 10
+PowerBtn.Font = Enum.Font.GothamBold
+PowerBtn.AutoButtonColor = false
+PowerBtn.Parent = MainWindow
+AddRound(PowerBtn, 7)
+AddBorder(PowerBtn, Color3.fromRGB(70, 70, 95), 1)
+
+PowerBtn.MouseButton1Click:Connect(function()
+	powerIndex = (powerIndex % #PowerPresets) + 1
+	State.FlingPower = PowerPresets[powerIndex].value
+	PowerBtn.Text = PowerPresets[powerIndex].label
+end)
+
+local StopFlingBtn = Instance.new("TextButton")
+StopFlingBtn.Size = UDim2.new(0.5, -14, 0, 28)
+StopFlingBtn.Position = UDim2.new(0.5, 2, 0, 258)
+StopFlingBtn.BackgroundColor3 = Color3.fromRGB(48, 24, 34)
+StopFlingBtn.Text = "STOP FLING"
+StopFlingBtn.TextColor3 = Color3.fromRGB(255, 175, 190)
+StopFlingBtn.TextSize = 10
+StopFlingBtn.Font = Enum.Font.GothamBold
+StopFlingBtn.AutoButtonColor = false
+StopFlingBtn.Parent = MainWindow
+AddRound(StopFlingBtn, 7)
+AddBorder(StopFlingBtn, Color3.fromRGB(195, 65, 95), 1)
+
+StopFlingBtn.MouseButton1Click:Connect(function()
+	StopFlingCompletely()
+end)
+
+-- Player Search Box
+local SearchBox = Instance.new("TextBox")
+SearchBox.Size = UDim2.new(1, -24, 0, 26)
+SearchBox.Position = UDim2.fromOffset(12, 292)
+SearchBox.BackgroundColor3 = Color3.fromRGB(20, 20, 28)
+SearchBox.PlaceholderText = "Search player..."
+SearchBox.PlaceholderColor3 = Color3.fromRGB(125, 125, 150)
+SearchBox.Text = ""
+SearchBox.TextColor3 = Color3.fromRGB(238, 238, 250)
+SearchBox.TextSize = 11
+SearchBox.Font = Enum.Font.GothamMedium
+SearchBox.ClearTextOnFocus = false
+SearchBox.Parent = MainWindow
+AddRound(SearchBox, 6)
+AddBorder(SearchBox, Color3.fromRGB(45, 45, 62), 1)
+
+-- Player List ScrollFrame
+local PlayerListFrame = Instance.new("ScrollingFrame")
+PlayerListFrame.Size = UDim2.new(1, -24, 0, 94)
+PlayerListFrame.Position = UDim2.fromOffset(12, 324)
+PlayerListFrame.BackgroundColor3 = Color3.fromRGB(19, 19, 27)
+PlayerListFrame.BorderSizePixel = 0
+PlayerListFrame.ScrollBarThickness = 3
+PlayerListFrame.ScrollBarImageColor3 = Color3.fromRGB(125, 88, 245)
+PlayerListFrame.CanvasSize = UDim2.fromOffset(0, 0)
+PlayerListFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+PlayerListFrame.Parent = MainWindow
+AddRound(PlayerListFrame, 8)
+
+local PlayerLayout = Instance.new("UIListLayout")
+PlayerLayout.Padding = UDim.new(0, 4)
+PlayerLayout.SortOrder = Enum.SortOrder.Name
+PlayerLayout.Parent = PlayerListFrame
+
+local PlayerPad = Instance.new("UIPadding")
+PlayerPad.PaddingTop = UDim.new(0, 5)
+PlayerPad.PaddingBottom = UDim.new(0, 5)
+PlayerPad.PaddingLeft = UDim.new(0, 5)
+PlayerPad.PaddingRight = UDim.new(0, 5)
+PlayerPad.Parent = PlayerListFrame
+
+local function MatchesSearch(plr)
+	local q = State.SearchText:lower()
+	if q == "" then return true end
+	return plr.Name:lower():find(q, 1, true) ~= nil or plr.DisplayName:lower():find(q, 1, true) ~= nil
+end
+
+local function RebuildPlayerRows()
+	for _, ref in pairs(PlayerRowRefs) do
+		if ref.row then ref.row:Destroy() end
+	end
+	table.clear(PlayerRowRefs)
 
 	for _, plr in ipairs(Players:GetPlayers()) do
-		if plr ~= LocalPlayer then
-			local btn = Instance.new("TextButton")
-			btn.Name = plr.Name
-			btn.Size = UDim2.new(1, 0, 0, 30)
-			btn.BackgroundColor3 = Color3.fromRGB(28, 28, 39)
-			btn.Text = ""
-			btn.AutoButtonColor = false
-			btn.Parent = PlayerScroll
-			AddCorner(btn, 6)
+		if plr ~= LocalPlayer and MatchesSearch(plr) then
+			local row = Instance.new("Frame")
+			row.Name = plr.Name
+			row.Size = UDim2.new(1, 0, 0, 30)
+			row.BackgroundColor3 = Color3.fromRGB(28, 28, 39)
+			row.BorderSizePixel = 0
+			row.Parent = PlayerListFrame
+			AddRound(row, 6)
 
 			local nameLbl = Instance.new("TextLabel")
-			nameLbl.Size = UDim2.new(0.72, 0, 1, 0)
-			nameLbl.Position = UDim2.fromOffset(10, 0)
+			nameLbl.Size = UDim2.new(0.45, 0, 1, 0)
+			nameLbl.Position = UDim2.fromOffset(8, 0)
 			nameLbl.BackgroundTransparency = 1
-			nameLbl.Text = plr.DisplayName .. " (@" .. plr.Name .. ")"
-			nameLbl.TextColor3 = Color3.fromRGB(225, 225, 240)
+			nameLbl.Text = plr.DisplayName
+			nameLbl.TextColor3 = Color3.fromRGB(228, 228, 242)
 			nameLbl.TextSize = 11
 			nameLbl.Font = Enum.Font.GothamMedium
 			nameLbl.TextXAlignment = Enum.TextXAlignment.Left
 			nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
-			nameLbl.Parent = btn
+			nameLbl.Parent = row
 
-			local badge = Instance.new("TextLabel")
-			badge.Size = UDim2.fromOffset(46, 18)
-			badge.Position = UDim2.new(1, -52, 0.5, -9)
-			badge.BackgroundColor3 = Color3.fromRGB(120, 85, 240)
-			badge.Text = "FLING"
-			badge.TextColor3 = Color3.fromRGB(255, 255, 255)
-			badge.TextSize = 10
-			badge.Font = Enum.Font.GothamBold
-			badge.Parent = btn
-			AddCorner(badge, 4)
+			local flingBtn = Instance.new("TextButton")
+			flingBtn.Size = UDim2.fromOffset(44, 20)
+			flingBtn.Position = UDim2.new(1, -142, 0.5, -10)
+			flingBtn.BackgroundColor3 = (State.TargetPlayer == plr) and Color3.fromRGB(205, 65, 95) or Color3.fromRGB(125, 88, 245)
+			flingBtn.Text = (State.TargetPlayer == plr) and "STOP" or "FLING"
+			flingBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+			flingBtn.TextSize = 9
+			flingBtn.Font = Enum.Font.GothamBold
+			flingBtn.AutoButtonColor = false
+			flingBtn.Parent = row
+			AddRound(flingBtn, 4)
 
-			btn.MouseButton1Click:Connect(function()
+			local tpBtn = Instance.new("TextButton")
+			tpBtn.Size = UDim2.fromOffset(36, 20)
+			tpBtn.Position = UDim2.new(1, -94, 0.5, -10)
+			tpBtn.BackgroundColor3 = Color3.fromRGB(40, 52, 74)
+			tpBtn.Text = "TP"
+			tpBtn.TextColor3 = Color3.fromRGB(210, 230, 255)
+			tpBtn.TextSize = 9
+			tpBtn.Font = Enum.Font.GothamBold
+			tpBtn.AutoButtonColor = false
+			tpBtn.Parent = row
+			AddRound(tpBtn, 4)
+
+			local isViewingThis = (State.ViewingPlayer == plr)
+			local viewBtn = Instance.new("TextButton")
+			viewBtn.Size = UDim2.fromOffset(46, 20)
+			viewBtn.Position = UDim2.new(1, -54, 0.5, -10)
+			viewBtn.BackgroundColor3 = isViewingThis and Color3.fromRGB(60, 120, 95) or Color3.fromRGB(45, 45, 60)
+			viewBtn.Text = isViewingThis and "UNVIEW" or "VIEW"
+			viewBtn.TextColor3 = Color3.fromRGB(220, 220, 235)
+			viewBtn.TextSize = 9
+			viewBtn.Font = Enum.Font.GothamBold
+			viewBtn.AutoButtonColor = false
+			viewBtn.Parent = row
+			AddRound(viewBtn, 4)
+
+			flingBtn.MouseButton1Click:Connect(function()
 				local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 				if not hrp then return end
 
 				if State.TargetPlayer == plr then
 					State.TargetPlayer = nil
 					if not State.TouchFling then
-						StopFling()
+						StopFlingCompletely()
 					else
-						ResetMomentumAndReturn()
+						RestoreSavedCFrame()
 					end
+					RebuildPlayerRows()
 				else
 					if not State.SavedCFrame then
 						State.SavedCFrame = hrp.CFrame
 					end
 					State.TargetPlayer = plr
-					StartFling()
+					StartFlingEngine()
+					RebuildPlayerRows()
 				end
 			end)
 
-			PlayerItems[plr.UserId] = btn
+			tpBtn.MouseButton1Click:Connect(function()
+				local myHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+				local tHrp = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+				if myHrp and tHrp then
+					myHrp.AssemblyLinearVelocity = Vector3.zero
+					myHrp.AssemblyAngularVelocity = Vector3.zero
+					myHrp.CFrame = tHrp.CFrame * CFrame.new(0, 0, -3)
+				end
+			end)
+
+			viewBtn.MouseButton1Click:Connect(function()
+				local cam = workspace.CurrentCamera
+				local tHum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+				if not cam or not tHum then return end
+
+				if State.ViewingPlayer == plr then
+					ResetCameraToSelf()
+				else
+					State.ViewingPlayer = plr
+					cam.CameraSubject = tHum
+					RebuildPlayerRows()
+				end
+			end)
+
+			PlayerRowRefs[plr.UserId] = {
+				row = row,
+				viewBtn = viewBtn,
+			}
 		end
 	end
 end
 
-RebuildPlayerList()
-Players.PlayerAdded:Connect(RebuildPlayerList)
+SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
+	State.SearchText = SearchBox.Text
+	RebuildPlayerRows()
+end)
+
+RebuildPlayerRows()
+Players.PlayerAdded:Connect(RebuildPlayerRows)
 Players.PlayerRemoving:Connect(function(plr)
 	if State.TargetPlayer == plr then
 		State.TargetPlayer = nil
 		if not State.TouchFling then
-			StopFling()
+			StopFlingCompletely()
 		else
-			ResetMomentumAndReturn()
+			RestoreSavedCFrame()
 		end
 	end
-	RebuildPlayerList()
+	if State.ViewingPlayer == plr then
+		ResetCameraToSelf()
+	end
+	RebuildPlayerRows()
+end)
+
+-- Character Respawn Safety
+local function AttachCharacterHooks(char)
+	StopFlingCompletely()
+	RefreshPartCache(char)
+
+	char.DescendantAdded:Connect(function(desc)
+		if desc:IsA("BasePart") and desc.Name ~= "HumanoidRootPart" then
+			table.insert(CachedNonRoot, desc)
+		end
+	end)
+
+	local hum = char:WaitForChild("Humanoid", 5)
+	if hum then
+		if State.SpeedBoost then hum.WalkSpeed = 28 end
+		if State.JumpBoost then
+			hum.UseJumpPower = true
+			hum.JumpPower = 72
+		end
+		hum.Died:Connect(function()
+			StopFlingCompletely()
+		end)
+	end
+end
+
+if LocalPlayer.Character then
+	AttachCharacterHooks(LocalPlayer.Character)
+end
+LocalPlayer.CharacterAdded:Connect(AttachCharacterHooks)
+
+-- Anti-Void & Movement Guard
+Connections.GuardHeartbeat = RunService.Heartbeat:Connect(function()
+	local char = LocalPlayer.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+	if hum then
+		if State.SpeedBoost and hum.WalkSpeed ~= 28 then
+			hum.WalkSpeed = 28
+		end
+		if State.JumpBoost and hum.JumpPower ~= 72 then
+			hum.UseJumpPower = true
+			hum.JumpPower = 72
+		end
+	end
+
+	if State.AntiVoid and hrp and hrp.Position.Y < -40 then
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
+		hrp.CFrame = FindSafeLobbyCFrame()
+	end
 end)
 
 -- Toggle Window Visibility
-FloatClick.MouseButton1Click:Connect(function()
-	MainFrame.Visible = not MainFrame.Visible
+FloatBtn.MouseButton1Click:Connect(function()
+	MainWindow.Visible = not MainWindow.Visible
 end)
